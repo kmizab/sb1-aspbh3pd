@@ -1,0 +1,1820 @@
+import os
+import xlsxwriter
+import re
+import datetime
+import glob
+from openpyxl import load_workbook
+from itertools import chain
+from rancid import f
+from rancidinv import finv
+
+import sys
+reload(sys)
+sys.setdefaultencoding('utf8')
+
+script_message = (
+    "---[ SCRIPT IP ]-----------------------------------------------------------
+--\n"
+    "Prerequis :\n\n"
+    "Lancer le script elo_in_script4.py\n"
+    "Le fichier Entree_Script_IP_YYYY_MM_JJ a la date du jour sera genere.\n"
+    "Sinon le script va prendre le fichier d entree le plus recent\n\n"
+    "Script IP v2.0 Dev. par Erhan ZILIFLI (2023)\n"
+    "---------------------------------------------------------------------------
+--\n"
+)
+
+print(script_message)
+
+while True:
+    reponse = raw_input('\nLancer le programme ? (o/n): ')
+    if reponse.lower() != 'n':
+        print('\nExecution de la partie Resultat_Chaine...\n')
+        break
+    elif reponse.lower() == 'n':
+        print('\nFin du programme...\n')
+        quit()
+
+output_date = datetime.datetime.now().strftime("%Y-%m-%d")
+file_elo = r'/data/internes/intTOP50/Entree_Script_IP_{}.xlsx'.format(output_dat
+e)
+# file_elo = r'C:/Users/u117235/Documents/ELO_IN_TEST.xlsx'
+# dir_conf = r'C:/Users/u117235/Documents/SCRIPT_IP_EP/TEST DEBBUG/CONFPE/'
+# dir_inv = r'C:/Users/u117235/Documents/SCRIPT_IP_EP/TEST DEBBUG/INVENTORY/'
+
+if not os.path.exists(file_elo):
+    files = glob.glob(r'/data/internes/intTOP50/Entree_Script_IP_*.xlsx')
+    if files:
+        latest_file = max(files, key=os.path.getctime)
+        file_elo = latest_file
+
+### La classe Routeur est une representation d'un objet routeur avec des attribu
+ts tels que pe, vlan, etats, p_in, et p_out ###
+
+class Routeur:
+    def __init__(self, pe, vlan, etats, p_in, p_out, pec_uae):
+        self.pe = pe
+        self.vlan = vlan
+        self.etats = etats
+        self.p_in = p_in
+        self.p_out = p_out
+        self.pec_uae = pec_uae
+
+### Fonction permettant de verifier si la conf du PE existe sur le server ###
+
+    def verif_conf(self, path, swag):
+        if swag == '31TLS1-NRO-1': swag = '31tls1-nro-1.nro.gaoland.net'
+        if swag == '92CBV1-NRO-1': swag = '92cbv1-nro-1.nro.gaoland.net'
+        if swag is None or path is None:
+            return False, None, []
+        if not os.path.exists(path):
+            return False, None, []
+        verif_result = False
+        full_path_result = None
+        csv_data = []
+        for file in os.listdir(path):
+            if file.startswith(swag.lower()) and not file.lower().endswith('-hb'
+):
+                verif_result = True
+                full_path_result = os.path.join(path, file)
+
+                try:
+                    with open(full_path_result, mode='r') as f:
+                        csv_data = f.readlines()
+                except IOError as e:
+                    print('Erreur lors de la lecture du fichier CSV : {}'.format
+(e))
+                    csv_data = []
+                break
+        return verif_result, full_path_result, csv_data
+
+### Fonction permettant de recuperer le port d entree du SWAG ###
+
+    def swag_p_in(self, Routeur1, Adduct1, csv_data, inv_data):
+        with open(csv_data, mode='r') as f:
+            csv_read = f.read()
+
+        if "\n#\n" in csv_read and any(substring in Routeur1.pe for substring in
+ ('-SWAGR-', '-SWGNG-', '-S6348-', '-S6330-', '-SWS-')):
+            blocs = [bloc for bloc in csv_read.split('\n#\n') if 'interface ' in
+ bloc and 'description ' in bloc and not 'protocol-transparent' in bloc]
+            blocs_out = [bloc for bloc in csv_read.split('\n#\n') if 'eth-trunk
+' in bloc and 'description ' in bloc and not 'shutdown' in bloc]
+        elif "\n#\n" not in csv_read and any(substring in Routeur1.pe for substr
+ing in ('-OS68E-', '-OS685-', '-OS655-')):
+            blocs_init = [bloc for bloc in csv_read.split(' :\n') if 'interfaces
+ ' in bloc and 'alias ' in bloc]
+            blocs = [bloc for bloc in blocs_init[0].split('\n') if 'interfaces '
+ in bloc and 'alias ' in bloc]
+            blocs_out = [bloc for bloc in blocs_init[0].split('\n') if Routeur1.
+pe in bloc and 'alias ' in bloc]
+        else:
+            return None, None
+
+        vfind = 'None'
+        bloc_in = None
+
+        for current_bloc in blocs:
+            if Adduct1.mid and Adduct1.mid in current_bloc:
+                vfind = 'MID'
+                bloc_in = current_bloc
+                break
+            elif Adduct1.rad and Adduct1.rad in current_bloc:
+                vfind = 'RAD'
+                bloc_in = current_bloc
+                break
+
+        if not bloc_in:
+            Adduct1.rad = Adduct1.rad.rsplit('-', 1)[0].replace('RAD-', '') + '-
+'
+            for current_bloc in blocs:
+                if Routeur1.vlan and ' {} '.format(str(Routeur1.vlan)) in curren
+t_bloc and Adduct1.p_uae in current_bloc:
+                    vfind = 'VLAN'
+                    bloc_in = current_bloc
+                    break
+                elif Adduct1.cptl and Adduct1.cptl in current_bloc:
+                    vfind = 'CPTL'
+                    bloc_in = current_bloc
+                    break
+                elif Adduct1.p_uae and Adduct1.p_uae in current_bloc:
+                    vfind = 'P_UAE'
+                    bloc_in = current_bloc
+                    break
+                elif Adduct1.rad and Adduct1.rad in current_bloc:
+                    vfind = 'RAD'
+                    bloc_in = current_bloc
+                    break
+        blocs_pe_out = [' '.join(Routeur1.filtre_desc(bloc, Routeur1)) for bloc
+in blocs_out if bloc]
+        blocs_pe_out = list(set(filter(None, blocs_pe_out)))
+
+        if len(blocs_pe_out) > 1: blocs_pe_out = Routeur1.peco_y(Routeur1, inv_d
+ata, blocs_pe_out)
+        # if len(blocs_pe_out) > 1 and any('-PECNG-' in bloc for bloc in blocs_p
+e_out):
+        #     blocs_eth = [bloc for bloc in csv_read.split('\n#\n')if all(keywor
+d in bloc for keyword in ('interface Eth-Trunk', 'description ', 'port trunk all
+ow-pass vlan'))]
+        #     eth_configs = [[line for line in bloc.split('\n') if any(keyword i
+n line for keyword in ('description ', 'interface Eth-Trunk', 'port trunk allow-
+pass vlan')) and 'undo' not in line] for bloc in blocs_eth[:2]]
+        #     trunk_configs = [Routeur1.extract_vlan_ranges(config) for config i
+n eth_configs]
+        #     is_in_trunk = [Routeur1.vlan_in_trunk(Routeur1.vlan, trunk_config)
+ for trunk_config in trunk_configs]
+        #     if is_in_trunk[0]:
+        #         blocs_pe_out = Routeur1.filtre_desc(eth_configs[0][1], Routeur
+1)
+        #     else:
+        #         blocs_pe_out = Routeur1.filtre_desc(eth_configs[1][1], Routeur
+1)
+        # else:
+        #     blocs_pe_out = Routeur1.peco_y(Routeur1, inv_data, blocs_pe_out)
+
+        blocs_p_out = [' '.join(Routeur1.filtre_port(bloc_out, Routeur1)) for bl
+oc_out in blocs_out if bloc_out]
+        blocs_port_in = ' '.join(Routeur1.filtre_port(bloc_in, Routeur1)) if blo
+c_in else None
+        return blocs_port_in, vfind, ' '.join(blocs_p_out), ' '.join(blocs_pe_ou
+t).strip()
+
+### Fonction permettant d extraire les vlans dans un range ###
+
+    # def extract_vlan_ranges(self, eth_config):
+    #     for line in eth_config:
+    #         if 'port trunk allow-pass vlan' in line:
+    #             vlan_ranges_str = line.split('port trunk allow-pass vlan')[1].
+strip()
+    #             return self.parse_vlan_ranges(vlan_ranges_str)
+    #     return []
+
+### Convertit une chaine de plages VLAN en liste de tuples (debut, fin) ###
+
+    # def parse_vlan_ranges(self, vlan_ranges_str):
+    #     vlan_ranges = []
+    #     cleaned_ranges_str = re.sub(r'(\d+ to \d+)', r',\1', vlan_ranges_str).
+strip(',')
+    #     ranges = [v.strip() for v in cleaned_ranges_str.split(',')]
+
+    #     for vlan_range in ranges:
+    #         if 'to' in vlan_range:
+    #             try:
+    #                 start, end = map(int, vlan_range.split('to'))
+    #                 vlan_ranges.append((start, end))
+    #             except ValueError:
+    #                 raise ValueError("Format de plage invalide : {}".format(vl
+an_range))
+    #         else:
+    #             try:
+    #                 vlan = int(vlan_range.strip())
+    #                 vlan_ranges.append((vlan, vlan))
+    #             except ValueError:
+    #                 raise ValueError("Format de VLAN invalide : {}".format(vla
+n_range))
+    #     return vlan_ranges
+
+### Verifie si un VLAN appartient aux plages d'un trunk ###
+
+    # def vlan_in_trunk(self, vlan, trunk_config):
+    #     for vlan_range in trunk_config:
+    #         if vlan_range[0] <= vlan <= vlan_range[1]:
+    #             return True
+    #     return False
+
+### Fonction permettant de verifier si le Trunk du SWAG est UP (pour les connexi
+on en Y migration PE) ###
+
+    def peco_y(self, Routeur1, inv_data, blocs_pe_out):
+        for pe in blocs_pe_out:
+            for inv in inv_data:
+                if '!Interfaces: Eth-Trunk' in inv and pe in inv and 'down' in i
+nv:
+                    blocs_pe_out.remove(pe)
+        return blocs_pe_out
+
+### Fonction permettant de recuperer le port d entree du SWAG OLT ###
+
+    def conf_olt(self, Routeur1, Adduct1, csv_data):
+        for line in csv_data:
+            if Adduct1.mid in line:
+                vfind = 'MID'
+                break
+            elif Adduct1.rad in line:
+                vfind = 'RAD'
+                break
+        vlist = ''.join(line).split(' ')
+        return vlist[1].replace('--slot=', 'S') + "/" + vlist[2].replace('--port
+=eth.', ''), vfind
+
+### Fonction permettant de verifier l etat du port d'entree du SWAG ###
+
+    def inv_hw(self, Routeur1, Adduct1, csvinv_data):
+        Port_1 = Routeur1.p_in.replace('interface ', '').replace('GigabitEtherne
+t', 'GE') if 'GigabitEthernet' in Routeur1.p_in else Routeur1.p_in.replace('inte
+rface ', '').replace('G', 'GE')
+        Port_2 = Routeur1.p_in.replace('interfaces ', '').replace('S', '') if 'S
+' in Routeur1.p_in else Routeur1.p_in.replace('interfaces ', '').replace('G', ''
+)
+        for inv in csvinv_data:
+            if (Port_1 in inv and '!Interfaces' in inv) or (Adduct1.cptl is not
+None and Adduct1.cptl in inv and '!Interfaces' in inv):
+                vlist = list(set(str(inv).rstrip('\n').split()))
+                Routeur1.etats = 'DOWN' if 'down' in vlist else 'UP'
+                break
+            elif (Port_2 in inv and 'Interfaces' in inv) or (Adduct1.cptl is not
+ None and Adduct1.cptl in inv and '!Interfaces' in inv):
+                vlist = list(set(str(inv).rstrip('\n').split(';')))
+                Routeur1.etats = 'DOWN' if 'down' in vlist else 'UP'
+                break
+        else:
+            Routeur1.etats = 'Mid Absent/LIBRE'
+
+### Fonction permettant de recuperer dans une chaine les differents nom de PE SW
+AG et PECO ###
+
+    def filtre_desc(self, strings, Routeur1):
+        vdesc = re.split('[^a-zA-Z0-9-]', str(strings).upper())
+        vdesc = list(set(vdesc))
+        patterns = [
+            r'^[^-_]*-AS[^-]*-[^-/]*$',
+            r'^[^-_]*-AS[^-]*-[^-/]*-[^-/]*$',
+            r'^[^-_]*-PE[^-][^BIB]*-[^-/]*$',
+            r'^[^-_]*-NRO[^-]*-[^-/]*$',
+            r'[^-_]*-ASR[^-]*-[^-_]*',
+            r'^[^-_]*-S[^-][^SFIP]*-[^-/]*$']
+        result = []
+        for element in vdesc:
+            if not Routeur1.pe in element and '-PEAG-' not in element and '-SEC-
+' not in element:
+                for pattern in patterns:
+                    if re.match(pattern, element):
+                        nouvelle_chaine = re.sub(r'^(.*?-.*?-.*?)-.*$', r'\1', e
+lement)
+                        if '-BE' in element: nouvelle_chaine = element.split('-B
+E')[0]
+                        result.append(nouvelle_chaine)
+                        break
+        return list(set(result))
+
+### Fonction permettant de recuperer dans une chaine les differents nom de PE co
+te backbone ###
+
+    def filtre_bib(self, strings, Routeur2, Routeur2_pe):
+        vdesc = re.split('[^a-zA-Z0-9-]', str(strings).upper())
+        vdesc = list(set(vdesc))
+        patterns = [
+            r'\b([A-Z0-9]+-ASR[A-Z0-9]+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-(?![^-]*SECOND[^-]*)SE[A-Z0-9]+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-ASR[A-Z0-9]+-[A-Z0-9]+-CR+)\b',
+            r'\b([A-Z0-9]+-CRS[A-Z0-9]+-[A-Z0-9]+-CR+)\b',
+            r'\b([A-Z0-9]+-PEBIB+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-PECNG+-[0-9]+)\b', r'\b([A-Z0-9]+-PECNG+-[A-Z0-9]+-DG
+A+)\b',
+            r'\b([A-Z0-9]+-NRO+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-SEC+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-CO+-[A-Z0-9]+)\b', r'\b([A-Z0-9]+-BIB+-[A-Z0-9]+)\b',
+
+            r'\b([A-Z0-9]+-P+-[A-Z0-9]+)\b', r'\b([A-Z0-9]+-PESMS+-[A-Z0-9]+)\b'
+]
+        result = []
+        for element in vdesc:
+            if element == '92TSN1-PECNG-1-101-78VRS2-PECNG-1': element = '78VRS2
+-PECNG-1'
+            if element == '65TPA-SE100-01': element = '64TPA-SE100-01'
+            if 'EQUIPEMENT-' in element: element = element.replace('EQUIPEMENT-'
+, '')
+            if '-TE0' in element: element = element.replace('-TE0', '')
+            if not Routeur2_pe in element or Routeur2_pe + '-CR' in element:
+                for pattern in patterns:
+                    if re.match(pattern, element):
+                        nouvelle_chaine = re.sub(r'^(.*?-.*?-.*?-CR)-.*$' if '-C
+R' in element else r'^(.*?-.*?-.*?)-.*$', r'\1', element)
+                        result.append(nouvelle_chaine)
+                        break
+        return list(set(result))
+
+### Fonction permettant de recuperer dans une chaine les ports des PE ###
+
+    def filtre_port(self, portdata, Routeur2):
+        vport = re.split('[^a-zA-Z 0-9/]', str(portdata))
+        vport = list(set(vport))
+        patterns = [
+            r'\bport [0-9]+/[0-9]+/[a-zA-Z0-9]+/[0-9]+\b',
+            r'\bport [0-9]+/[0-9]+/[0-9]+\b',
+            r'\bport ethernet [0-9]+/[0-9]+\b',
+            r'\binterface GigabitEthernet[0-9]+/[0-9]+/[0-9]+/[0-9]+\b', r'\bint
+erface GigabitEthernet[0-9]+/[0-9]+/[0-9]+\b', r'\binterface 100GE[0-9]+/[0-9]+/
+[0-9]+\b', r'\binterface XGigabitEthernet[0-9]+/[0-9]+/[0-9]+\b', r'\binterface
+TenGigE[0-9]+/[0-9]+/[0-9]+/[0-9]+/[0-9]+\b', r'\binterface TenGigE[0-9]+/[0-9]+
+/[0-9]+/[0-9]+\b', r'\binterface TenGigabitEthernet[0-9]+/[0-9]+\b', r'\binterfa
+ce HundredGigE[0-9]+/[0-9]+/[0-9]+/[0-9]+\b', r'\binterfaces [0-9]+/[0-9]+\b', r
+'\bTrunk[0-999]+\b']
+        result = []
+        for element in vport:
+            for pattern in patterns:
+                if re.match(pattern, element.strip()):
+                    result.append(element.replace('port ', 'T').replace('interfa
+ce ', '').replace('interfaces ', 'S').replace('Tethernet ', 'T').replace('Gigabi
+tEthernet', 'G').replace('TenGigE', 'Te').replace('HundredGigE', 'Hu').replace('
+TenG', 'Te').replace(' alias ', '').replace('Trunk', 'Eth-Trunk').strip())
+                    break
+        return result
+
+### Fonction permettant de corriger des erreurs ###
+
+    def exceptions(self, blocs_bib, routeur_pe):
+        conditions_de_suppression = {
+            'ISS2-PESMS-1': 'PSO1-PESMS-1', '92TSN1-PECNG-1': '92TSN1-PECNG-1',
+            'TLA1-PESMS-1': 'TLS2-CO-3',
+            'SDT2-PESMS-1': 'CBV1-CO-7',
+            'LIM2-PESMS-1': '31TLS1-PEBIB-4'
+        }
+        element_a_supprimer = conditions_de_suppression.get(routeur_pe)
+        if element_a_supprimer in blocs_bib:
+            blocs_bib.remove(element_a_supprimer)
+
+        count_pebib = sum(1 for bloc in blocs_bib if '-PEBIB-' in bloc)
+
+        if count_pebib == 1:
+            blocs_bib = [bloc for bloc in blocs_bib if '-PEBIB-' not in bloc]
+        elif count_pebib == 2:
+            blocs_bib = [bloc for bloc in blocs_bib if '-PEBIB-' in bloc]
+
+        return blocs_bib
+
+### Fonction permettant de remplacer les PE CO par des PEBIB ###
+
+    def replace_values(self, routeur_pe):
+        remplacements = {
+            'CBV3-CO-6': '92CBV3-PEBIB-2', 'LYO1-CO-11': '69LYO1-PEBIB-1', 'NTS2
+-CO-4': '44NTS2-PEBIB-2', 'MAS1-CO-4': '91MAS1-PEBIB-2', '93ABV1-PEBIB-2': '93AU
+B1-PEBIB-2', 'VLT3-PEBIB-3': '94VLT3-PEBIB-3',
+            'PAR1-CO-6': '75PAR1-PEBIB-2', 'CBA1-CO-5': '69CBA1-PEBIB-1', 'POI1-
+CO-5': '86POI1-PEBIB-1', 'TLS1-CO-5': '31TLS1-PEBIB-1', 'LYO1-CO-9': '69LYO1-PEB
+IB-1', 'VEL1-CO-4': '78VEL1-PEBIB-2', 'CBA2-PEBIB-1': '69CBA2-PEBIB-1',
+            'TLS1-CO-6': '31TLS1-PEBIB-2', 'AIX1-CO-3': '13AIX1-PEBIB-1', 'GNB1-
+CO-5': '38GNB1-PEBIB-1', 'TH21-CO-9': '75TH21-PEBIB-1', 'LSE1-CO-3': '83LSE1-PEB
+IB-1', 'NIC1-CO-5': '06NIC1-PEBIB-1', 'MIT1-CO-6': '77MIT2-PEBIB-2',
+            'PAR1-CO-7': '75PAR1-PEBIB-1', 'TH21-CO-8': '75TH21-PEBIB-2', 'SBG3-
+CO-4': '67SBG3-PEBIB-2', 'BDX4-CO-3': '33BDX4-PEBIB-1', 'MPL1-CO-4': '34MPL1-PEB
+IB-2', 'BRO1-CO-3': '69BRO1-PEBIB-1', 'ORL1-CO-6': '45ORL1-PEBIB-2',
+            'NTS2-CO-3': '44NTS2-PEBIB-1', 'TLS3-CO-1': '31TLS3-PEBIB-1', 'SBG1-
+CO-6': '67SBG1-PEBIB-2', 'MPL1-CO-3': '34MPL1-PEBIB-1', 'TRA1-CO-3': '78TRA1-PEB
+IB-1', 'GNB3-CO-4': '38GNB3-PEBIB-2', 'ORL1-CO-5': '45ORL1-PEBIB-1',
+            'SBG3-CO-3': '67SBG3-PEBIB-1', 'VLT3-CO-5': '94VLT3-PEBIB-1', 'MRS1-
+CO-1': '13MRS1-PEBIB-1', 'ABV1-CO-6': '93AUB1-PEBIB-2', 'TRA1-CO-4': '78TRA1-PEB
+IB-2', 'BDX-BIB-1': '33BDX1-PEBIB-1', 'CPY1-PEBIB-3': '94CPY1-PEBIB-3',
+            'ABV1-CO-7': '93AUB1-PEBIB-1', 'LIL1-CO-5': '59LIL1-PEBIB-1', 'LIL1-
+CO-6': '59LIL1-PEBIB-2', 'MRS1-CO-2': '13MRS1-PEBIB-2', 'BRO1-CO-4': '69BRO1-PEB
+IB-2', 'CPY1-CO-3': '94CPY1-PEBIB-1', 'LYO1-CO-8': '69LYO1-PEBIB-2',
+            '92NTR-SE120-01': '92CAP-ASR9K-01', 'MRS1-PEBIB-1': '13MRS1-PEBIB-1'
+, 'MRS1-PEBIB-2': '13MRS1-PEBIB-2', 'NIC2-PEBIB-4': '06NIC2-PEBIB-4', 'REN1-PEBI
+B-1': '35REN1-PEBIB-1', 'REN1-PEBIB-2': '35REN1-PEBIB-2',
+            'CBV4-PEBIB-1': '92CBV4-PEBIB-1', 'LYO1-PEBIB-2': '69LYO1-PEBIB-2',
+'LYO1-PEBIB-2': '69LYO1-PEBIB-2', 'CAL1-PEBIB-3': '62CAL1-PEBIB-3', 'MTZ3-PEBIB-
+3': '57MTZ3-PEBIB-3', 'MIT2-PEBIB-2': '77MIT2-PEBIB-2'
+        }
+
+        if routeur_pe is not None:
+            for valeur, remplacement in remplacements.items():
+                if ' ' + valeur in routeur_pe or routeur_pe.startswith(valeur):
+                    routeur_pe = routeur_pe.replace(valeur, remplacement)
+        return routeur_pe
+
+### Fonction permettant de recuperer les ports d entree et sortie du PE et obten
+ir le ou les nom du PE suivant ###
+
+    def conf_peco(self, Routeur2, Adduct_offre, Routeur2_pe, Routeur1_pe, csv_da
+ta):
+        with open(csv_data, mode='r') as f:
+            csv_read = f.read()
+
+        if Routeur1_pe == 'BEA2-SWAGR-1A': Routeur1_pe = 'BEA1-SWAGR-1A'
+        if Routeur1_pe == 'PGA1-SWAGR-1B': Routeur1_pe = 'PGA1-SWAGR-1A'
+
+        if "\n!\n" in csv_read and any(substring in Routeur2_pe for substring in
+ ('-PESMS-', '-PEHMS-', '-PECNG-', '-ASR91-', '-ASR96-')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Routeur1_pe
+in bloc.upper() and not ' access' in bloc and not 'Bundle-Ether' in bloc]
+            blocs_pe = [bloc for bloc in csv_read.split('\n!\n') if ('link-group
+ BE' in bloc and 'port ethernet' in bloc) or ('bind interface bib' in bloc and '
+port ethernet' in bloc) or ('bind interface nim' in bloc and 'port ethernet' in
+bloc) or ('interface HundredGigE' in bloc and not 'shutdown' in bloc and not ' r
+esilier ' in bloc and 'load-interval' in bloc and not 'bundle port-priority'in b
+loc) or ('interface TenGigE' in bloc and not 'shutdown' in bloc and not ' resili
+er ' in bloc and 'load-interval' in bloc and not 'bundle port-priority'in bloc)]
+
+        elif "\n!\n" not in csv_read and any(substring in Routeur2_pe for substr
+ing in ('-PESMS-', '-PEHMS-', '-NRO-', '-PECNG-')):
+            blocs_in = [bloc for bloc in csv_read.split('    exit') if Routeur1_
+pe in bloc.upper()]
+            blocs_pe = [bloc for bloc in csv_read.split('    exit') if 'QUEUE-BB
+' in bloc and 'egress-scheduler-policy "PORT-BB"' in bloc]
+        elif "\n!\n" in csv_read and any(substring in Routeur2_pe for substring
+in ('-NRO-', '-SE800-', '-SE120-', '-SE100-', '-SE400-')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Routeur1_pe
+in bloc.upper() and 'port ethernet' in bloc and 'description' in bloc]
+            blocs_pe = [bloc for bloc in csv_read.split('\n!\n') if 'router mpls
+' in bloc]
+            blocs_out = [bloc for bloc in csv_read.split('\n!\n') if 'port ether
+net' in bloc and 'description' in bloc]
+        elif "\n!\n" in csv_read and any(substring in Routeur2_pe for substring
+in ('-ASR9K-', '-SWS-')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Routeur1_pe
+in bloc.upper() and not ' access' in bloc and not 'Bundle-Ether' in bloc]
+            blocs_pe = [bloc for bloc in csv_read.split('\n!\n') if all(keyword
+in bloc for keyword in ['interface', 'QOS-BB-OUT', 'load-interval']) and all(key
+word not in bloc for keyword in ['shutdown', 'mtu 7814'])]
+            blocs_out = [bloc for bloc in csv_read.split('\n!\n') if all(keyword
+ in bloc for keyword in ['interface', 'description']) and all(keyword not in blo
+c for keyword in ['shutdown', 'Bundle-Ether'])]
+        else:
+            return None, None, None
+
+        blocs_p_in = [' '.join(Routeur2.filtre_port(bloc, Routeur2_pe)) for bloc
+ in blocs_in if blocs_in and not ' lag ' in bloc]
+        if 'LAN' in Adduct_offre: return ' '.join(blocs_p_in), 'LAN2LAN', 'LAN2L
+AN'
+        blocs_bib = [' '.join(Routeur2.filtre_bib(bloc.upper(), Routeur2, Routeu
+r1_pe)) for bloc in blocs_pe if blocs_pe]
+
+
+
+        blocs_bib = set(blocs_bib)
+        blocs_bib = [liste for liste in blocs_bib if liste]
+
+        blocs_bib = [sous_element for element in blocs_bib for sous_element in e
+lement.split(' ')]
+        blocs_bib = [pe for pe in blocs_bib if not ((Routeur2_pe == '92TSN1-PECN
+G-1' and pe == '92TSN1-PECNG-1') or (Routeur2_pe == '94CPS1-NRO-1' and pe == '94
+CPS1-NRO-1') or (Routeur2_pe == '31NTC-ASR96-01' and pe == '31TLS1-PEBIB-1') or
+(Routeur2_pe == '94VSS-ASR91-01' and pe == '94VSS-ASR91-01') or (Routeur2_pe ==
+'35TRE-SE100-01' and pe == '35TRE-SE100-01') or (Routeur2_pe == '33BOR-ASR96-01'
+ and pe == '33BOR-ASR96-01'))]
+
+        if len(blocs_bib) > 2 : blocs_bib = Routeur2.exceptions(blocs_bib, Route
+ur2_pe)
+        if any(substring in Routeur2.pe for substring in ('-NRO-', '-ASR9K-', '-
+SE')) and "\n!\n" in csv_read : blocs_pe = blocs_out
+
+        blocs_bib = ['93AUB1-PEBIB-1' if pe == 'ABV1-CO-7' and any(Routeur2_pe =
+= substring for substring in ('75CST1-NRO-1', '75PEL1-NRO-1')) else pe for pe in
+ blocs_bib]
+        blocs_bib = [pe for pe in blocs_bib if not (Routeur2_pe == '13AIX1-NRO-1
+' and pe == 'AIX1-CO-2')]
+
+        blocs_bib = [Routeur2.replace_values(pebloc) for pebloc in blocs_bib]
+        blocs_p_out = [' '.join(Routeur2.filtre_port(bloc, Routeur2_pe)) for blo
+c in blocs_pe if any(keyword.lower() in bloc.lower() for keyword in blocs_bib)]
+        if any(substring in Routeur2_pe for substring in ('-SE', '-ASR')) and an
+y('CRSX' in i or '-CR' in i for i in blocs_bib): return ' '.join(blocs_p_in), 'C
+PTL', 'CPTL'
+        return ' '.join(blocs_p_in), ' '.join(blocs_p_out), ' '.join(set(blocs_b
+ib))
+
+### Fonction permettant de recuperer les ports d entree des PE Backbone ###
+
+    def port_pebib(self, Routeur3, Rout2, Rout3, csv_data):
+        if 'LAN' in Rout3: return 'LAN2LAN' if blocs_in else ''
+        with open(csv_data, mode='r') as f:
+            csv_read = f.read()
+
+        if Rout2 == '76TRO-ASR96-01': Rout2 = '76TRO-ASR91-01'
+
+        if "\n!\n" in csv_read and any(substring in Rout3 for substring in ('-PE
+BIB-', '-PECNG-', '-SEC-', '-CO-', '-SE800-', '-SE120-', '-SE100-', '-SE400-', '
+-ASR')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Rout2 in blo
+c.upper() and all(keyword in bloc for keyword in ['interface ', 'description'])
+and all(keyword not in bloc for keyword in ['shutdown', 'Bundle-Ether', 'Deploie
+ment', '-PEAG-'])]
+        elif "\n!\n" not in csv_read and any(substring in Rout3 for substring in
+ ('-P-', '-PECNG-', '-NRO-')):
+            blocs_in = [bloc for bloc in csv_read.split('    exit') if Rout2 in
+bloc.upper() and 'description' in bloc and any(keyword in bloc for keyword in ['
+QUEUE-BB', 'mtu 4014', 'mtu 9198', 'mode hybrid']) and all(keyword not in bloc f
+or keyword in ['-PEAG-'])]
+        elif "\n!\n" in csv_read and any(substring in Rout3 for substring in ('-
+NRO-')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Rout2 in blo
+c.upper() and all(keyword in bloc for keyword in ['port ethernet', 'description'
+])]
+        else:
+            return ''
+        blocs_in = [' '.join(Routeur3.filtre_port(bloc, Rout2)) for bloc in bloc
+s_in if blocs_in]
+        return ' '.join(blocs_in) if blocs_in else ''
+
+### La classe Adduct est une representation d'un objet Adduct avec des attributs
+ tels que client, site, couple, mid, rtc, rad, p_uae et cptl ###
+
+class Adduct:
+    def __init__(self, client, site, offre, couple, mid, rtc, rad, p_uae, cptl):
+
+        self.client = client
+        self.site = site
+        self.offre = offre
+        self.couple = couple
+        self.mid = mid
+        self.rtc = rtc
+        self.rad = rad
+        self.p_uae = p_uae
+        self.cptl = cptl
+
+### La classe Rend est une representation d'un objet Rend avec des attributs tel
+s que peng1 et peng2 ###
+
+class Rend:
+    def __init__(self, peng1, peng2, wbxs, cpt):
+        self.peng1 = peng1
+        self.peng2 = peng2
+        self.wbxs = wbxs
+        self.cpt = cpt
+
+### Fonction permettant d ecrire les valeurs obtenues dans un fichier excel ###
+
+    def write_excel(self, wbxs, cpt, Rend1, Adduct1, Value1, Value2, Value3, Val
+ue4, Value5, Value6, Value7, Value8, Value9, Value10):
+        wbxs.write_row(cpt, 0, (Adduct1.client, Adduct1.site, Adduct1.couple, Ad
+duct1.mid, Value1, Value2, Value3, Value4, Value5, Value6, Value7, Value8, Value
+9, Value10, Rend1.peng1, Rend1.peng2))
+
+### Fonction permettant d ajouter des separateur entre les PE et les ports ###
+
+    def separateur(self, strings):
+        if strings == 'None None': strings = ''
+        return ' | '.join(strings.strip().split(' ')) if strings else ''
+
+def main():
+    cpt = 0
+    column = 0
+    cpttrue = 0
+    cptfalse = 0
+
+    try:
+        wb = load_workbook(file_elo)
+        ws = wb.active
+    except FileNotFoundError as e:
+        print('Erreur lors du chargement du fichier ELO_IN : {}'.format(e))
+        return
+
+    output_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    wbx = xlsxwriter.Workbook('/data/internes/intTOP50/Resultat_Chaine_{}.xlsx'.
+format(output_date))
+    # wbx = xlsxwriter.Workbook('C:/Users/{}/Documents/ELO_OUT_LAB_1.xlsx'.forma
+t(os.getenv("username"), output_date))
+    wbxs = wbx.add_worksheet()
+
+    content = ["Client", "Site", "Couple", "MID", "ETAT", "P_ETAT",
+                        "P_IN", "SWAG", "P_OUT", "P_IN", "PECO", "P_OUT", "P_IN"
+, "PEBIB", "PENG1", "PENG2"]
+
+    for item in content:
+        wbxs.write(cpt, column, item)
+        column += 1
+
+    mydic = []
+    for row in ws.values:
+        cptl = row[18] if len(row) > 18 else None
+        pec_uae = row[14] if len(row) > 14 else None
+        p_uae = row[12].replace('.', '/') if row[12] is not None and row[12] !=
+'' else None
+        mydic.append({'client': row[0], 'site': row[1], 'offre': row[2], 'mid':
+row[3], 'couple': row[4], 'rtc': row[5], 'rad': row[6], 'pe': row[7], 'vlan': ro
+w[8], 'peng1': row[9], 'peng2': row[10], 'p_uae': p_uae, 'cptl': cptl, 'pec_uae'
+: pec_uae})
+    mydic.pop(0)
+
+    for data_row in mydic:
+        Routeur1 = Routeur(data_row['pe'], data_row['vlan'], None, None, None, d
+ata_row['pec_uae'])
+        routeurs = [Routeur(None, None, None, None, None, None) for _ in range(5
+)]
+        Routeur2, Routeur3, Routeur4, Routeur5, Routeur6 = routeurs
+        Adduct1 = Adduct(data_row['client'], data_row['site'], data_row['offre']
+, data_row['couple'], data_row['mid'], None, data_row['rad'], data_row['p_uae'],
+ data_row['cptl'])
+        Rend1 = Rend(data_row['peng1'], data_row['peng1'], wbxs, cpt)
+        dir_conf = f(Routeur1.pe)
+        dir_inv = finv(Routeur1.pe)
+        verif_result, full_path_result, csv_data = Routeur1.verif_conf(dir_conf,
+ Routeur1.pe)
+        verif_inv, full_inv_result, csv_inv = Routeur1.verif_conf(dir_inv, Route
+ur1.pe)
+        if verif_result and csv_data:
+            if any(substring in Routeur1.pe for substring in ('-SWAGR-', '-SWGNG
+-', '-S6348-', '-S6330-', '-SWS-', '-OS68E-', '-OS685-', '-OS655-')): Routeur1.p
+_in, vfind, Routeur1.p_out, Routeur2.pe = Routeur1.swag_p_in(Routeur1, Adduct1,
+full_path_result, csv_inv)
+            if Routeur1.pec_uae is not None and Routeur2.pe is not None and len(
+Routeur2.pe.split()) > 1:
+                Routeur_Y = Routeur2.pe
+                Routeur2.pe = Routeur1.pec_uae
+            else:
+                Routeur_Y = None
+            if '-GP-' in Routeur1.pe: Routeur1.p_in, vfind = Routeur1.conf_olt(R
+outeur1, Adduct1, csv_data)
+            if Routeur1.p_in and verif_inv: Routeur1.inv_hw(Routeur1, Adduct1, c
+sv_inv)
+
+            # if Routeur1.pe == 'BRS2-SWAGR-1A' and Routeur2.pe == 'BRS2-PEHMS-1
+': Routeur2.pe = 'BRS2-PESMS-1'
+            # if Routeur1.pe == 'PAU3-SWAGR-1A' and Routeur2.pe == 'TLS2-PESMS-1
+': Routeur2.pe = 'PAU3-PESMS-1'
+            # if Routeur1.pe == '77MIT3-SWAGR-1A' and Routeur2.pe == '77MIT3-NRO
+-1': Routeur2.pe = '77MIT2-PECNG-2'
+
+            dir_conf = f(Routeur2.pe)
+            verif_peco, full_peco_result, csv_peco = Routeur1.verif_conf(dir_con
+f, Routeur2.pe)
+            if verif_peco:
+                Routeur2.p_in, Routeur2.p_out, Routeur3.pe = Routeur2.conf_peco(
+Routeur2, Adduct1.offre, Routeur2.pe, Routeur1.pe, full_peco_result)
+
+            if Adduct1.rad.startswith('H') and Adduct1.rad[1].isdigit() and 'H77
+41' not in Adduct1.rad: Routeur3.pe = 'CPTL'
+            if Routeur2.pe == '67SAR1-NRO-1' and '67SBG1-PEBIB-2' in Routeur3.pe
+: Routeur3.pe = Routeur3.pe.replace('67SBG1-PEBIB-2', '67SBG1-PEBIB-4')
+            if Routeur2.pe == '75CST1-NRO-1' and '93ABV1-PEBIB-1' in Routeur3.pe
+: Routeur3.pe = Routeur3.pe.replace('93ABV1-PEBIB-1', '93AUB1-PEBIB-1')
+            if Routeur2.pe == '93KAR1-NRO-1' and '93ABV1-PEBIB-2' in Routeur3.pe
+: Routeur3.pe = Routeur3.pe.replace('93ABV1-PEBIB-2', '93AUB1-PEBIB-2')
+            if Routeur2.pe == '31MIN1-NRO-1' and '31TLS1-PEBIB-1' in Routeur3.pe
+: Routeur3.pe = Routeur3.pe.replace('31TLS1-PEBIB-1', '31TLS1-PEBIB-3')
+            if Routeur2.pe == '33ADO1-NRO-1' and 'BDX1-CO-7' in Routeur3.pe: Rou
+teur3.pe = Routeur3.pe.replace('BDX1-CO-7', '33BDX1-PEBIB-1')
+
+            if Routeur3.pe and not Routeur3.pe == 'CPTL' and 'LAN' not in Adduct
+1.offre:
+                elements = Routeur3.pe.split()
+                p_in_elements = []
+                for element in elements:
+                    dir_conf = f(element)
+                    verif_pebib, full_pebib_result, csv_pebib = Routeur3.verif_c
+onf(dir_conf, element)
+                    if verif_pebib:
+                        p_in_elements.append(Routeur3.port_pebib(Routeur3, Route
+ur2.pe, element, full_pebib_result))
+                    Routeur3.p_in = ' '.join(p_in_elements)
+                    if any(substring in element for substring in ('-NRO-', '-PES
+MS-', '-PECNG-')):
+                        Routeur4.pe = element
+                        dir_conf = f(Routeur4.pe)
+                        verif_pebib, full_pebib_result, csv_pebib = Routeur4.ver
+if_conf(dir_conf, Routeur4.pe)
+                        if verif_pebib:
+                            Routeur4.p_in, Routeur4.p_out, Routeur5.pe = Routeur
+4.conf_peco(Routeur4, Adduct1.offre, Routeur4.pe, Routeur2.pe, full_pebib_result
+)
+                            if Routeur5.pe in ['75TNO1-PECNG-1 75PAR1-PEBIB-1',
+'75PAR1-PEBIB-1 75TNO1-PECNG-1']: Routeur5.pe = '75PAR1-PEBIB-1'
+                            #print(Routeur5.pe)
+                            dir_conf = f(Routeur5.pe)
+                            verif_pebib, full_pebib_result, csv_pebib = Routeur5
+.verif_conf(dir_conf, Routeur5.pe)
+                            #print(verif_pebib)
+                            if verif_pebib :
+                                if "-NRO-" not in Routeur5.pe:
+                                    Routeur5.p_in = Routeur6.port_pebib(Routeur5
+, Routeur4.pe, Routeur5.pe, full_pebib_result)
+                                else:
+                                    Routeur5.p_in, Routeur5.p_out, Routeur6.pe =
+ Routeur5.conf_peco(Routeur5, Adduct1.offre, Routeur5.pe, Routeur4.pe, full_pebi
+b_result)
+                                    dir_conf = f(Routeur6.pe)
+                                    verif_pebib, full_pebib_result, csv_pebib =
+Routeur6.verif_conf(dir_conf, Routeur6.pe)
+                                    Routeur6.p_in = Routeur6.port_pebib(Routeur6
+, Routeur5.pe, Routeur6.pe, full_pebib_result)
+                            else:
+                                Routeur5.pe = "CONF#ABSENT#" + Routeur5.pe
+                                Routeur5.p_in = "PORT#NONE#" + Routeur5.pe
+                #print(Routeur3.pe, Routeur5.pe)
+                #print(Routeur3.p_in, Routeur4.p_out, Routeur5.p_in)
+                if Routeur5.pe and not Routeur6.pe:
+                    Routeur3.pe = Routeur3.pe.strip() + ' ' + Routeur5.pe.strip(
+)
+                    Routeur3.p_in = Routeur3.p_in.strip() + ' ' + Routeur4.p_out
+.strip() + ' ' + Routeur5.p_in.strip()
+                elif Routeur5.pe and Routeur6.pe:
+                    Routeur3.pe = Routeur3.pe.strip() + ' ' + Routeur5.pe.strip(
+) + ' ' + Routeur6.pe.strip()
+                    Routeur3.p_in = Routeur3.p_in.strip() + ' ' + Routeur4.p_out
+.strip() + ' ' + Routeur5.p_in.strip() + ' ' + Routeur5.p_out.strip() + ' ' + Ro
+uteur6.p_in.strip()
+
+            elif Routeur3.pe == 'CPTL':
+                Routeur3.p_in = 'CPTL'
+            elif Routeur3.pe == 'LAN2LAN':
+                Routeur3.p_in = 'LAN2LAN'
+            else:
+                Routeur3.p_in = None
+
+            if Routeur_Y is not None: Routeur2.pe = Routeur_Y
+            # if '75POU1-NRO-1' in Routeur3.pe and '92BOU2-PEBIB-1' in Routeur3.
+pe: Routeur2.p_out, Routeur3.p_in, Routeur3.pe = 'T1/1 T1/1 T1/2 T2/1', 'Te0/0/0
+/38 Te0/0/0/25', '92BOU2-PEBIB-1 75POU1-NRO-1 93AUB1-PEBIB-1'
+            if Routeur2.pe == Rend1.peng1 and 'LAN' not in Adduct1.offre: Routeu
+r2.p_out, Routeur3.p_in, Routeur3.pe = Adduct1.offre, Adduct1.offre, Adduct1.off
+re
+            if Routeur1.p_in is None and Routeur1.etats is None: Routeur1.etats,
+ vfind = ('Mid Absent/LIBRE', 'None')
+            print(Routeur1.p_in, Routeur1.etats, Routeur1.pe, Routeur2.pe, str(T
+rue) + ' ' + vfind)
+            cpttrue, cpt = cpttrue + 1, cpt + 1
+            Rend1.write_excel(wbxs, cpt, Rend1, Adduct1,'True ' + vfind, Routeur
+1.etats, Routeur1.p_in, Routeur1.pe, Rend1.separateur(Routeur1.p_out), Rend1.sep
+arateur(Routeur2.p_in), Rend1.separateur(Routeur2.pe), Rend1.separateur(Routeur2
+.p_out), Rend1.separateur(Routeur3.p_in), Rend1.separateur(Routeur3.pe))
+        else:
+            print(Routeur1.pe, None, False, 'Le fichier Conf est introuvable')
+            cptfalse, cpt = cptfalse + 1, cpt + 1
+            Rend1.write_excel(wbxs, cpt, Rend1, Adduct1, 'False', None, 'Conf Ab
+sent', Routeur1.pe, None, None, None, None, None, None)
+
+    print('Total: '+ str(cpt))
+    print('True: '+ str(cpttrue))
+    print('False: '+ str(cptfalse))
+
+    wbxs.set_column(0, 16, 30)
+    wbxs.autofilter(0, 0, 0, 16)
+    wbx.close()
+
+if __name__ == "__main__":
+    main()
+
+
+print("Execution de la partie...(Resultat_Compare)\n")
+
+import glob
+import os
+import openpyxl
+import datetime
+import difflib
+
+### Fonction permettant de detecter la difference des elements compares ###
+
+def find_differences(str2, str1):
+    str1 = ['None' if s is None else s for s in str1]
+    str2 = ['None' if s is None else s for s in str2]
+
+    d = difflib.Differ()
+    diff = list(d.compare(str1, str2))
+    # diff_only = [line[2:] for line in diff if line.startswith('+ ') or line.st
+artswith('- ') or line.startswith('? ') or line.startswith('  ')]
+    return ''.join(diff)
+
+### Fonction permettant de lire les fichiers excel ###
+
+def read_excel(file_path):
+    workbook = openpyxl.load_workbook(file_path)
+    sheet = workbook.active
+    data = [list(row) for i, row in enumerate(sheet.iter_rows(values_only=True),
+ start=1) if i > 1]
+    return data
+
+### Fonction permettant de comparer deux fichiers ###
+
+def compare_and_write_results(file1_data, file2_data, output_file):
+    output_workbook = openpyxl.Workbook()
+    output_sheet = output_workbook.active
+
+    output_sheet.append(["Row file T", "Row file T-1", "MID", "Couple", "SWAG",
+"Resultat", "Information"])
+
+    client_resilie_rows = []
+
+    for row_idx_file1, row_file1 in enumerate(file1_data, start=1):
+        for row_idx_file2, row_file2 in enumerate(file2_data, start=1):
+            if row_file1[3] == row_file2[3] and row_file1[7] == row_file2[7]:
+                compare_result1, compare_result2 = ("OK", "") if row_file1[0:] =
+= row_file2[0:] else ("NOK", find_differences(row_file1[5:], row_file2[5:]))
+                break
+        else:
+            compare_result1, compare_result2 = ("Nouveau client", "")
+
+        output_sheet.append([row_idx_file1 + 1, '', row_file1[3], row_file1[2],
+row_file1[7], compare_result1, compare_result2])
+
+    for row_idx_file2, row_file2 in enumerate(file2_data, start=1):
+        compare_result_file2 = "Client resilie"
+        for row_idx_file1, row_file1 in enumerate(file1_data, start=1):
+            if row_file2[3] == row_file1[3] and row_file2[7] == row_file1[7]:
+                compare_result_file2 = "OK"
+                break
+        else:
+            output_sheet.append(['', row_idx_file2 + 1, row_file2[3], row_file2[
+2], row_file2[7], compare_result_file2])
+
+    output_sheet.auto_filter.ref = output_sheet.dimensions
+
+    for column in output_sheet.columns:
+        max_length = 0
+        column = [cell for cell in column]
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(cell.value)
+            except:
+                pass
+        adjusted_width = (max_length + 2)
+        output_sheet.column_dimensions[openpyxl.utils.get_column_letter(column[0
+].column)].width = adjusted_width
+
+    output_workbook.save(output_file)
+
+excel_files_pattern = '/data/internes/intTOP50/Resultat_Chaine_*.xlsx'
+# excel_files_pattern = 'C:/Users/{}/Documents/Resultat_Chaine_*.xlsx'.format(os
+.getenv("username"))
+all_files = glob.glob(excel_files_pattern)
+
+sorted_files = sorted(all_files, key=os.path.getctime, reverse=True)
+
+if len(sorted_files) >= 2:
+    most_recent_file = sorted_files[0]
+    second_most_recent_file = sorted_files[1]
+
+    most_recent_data = read_excel(most_recent_file)
+    second_most_recent_data = read_excel(second_most_recent_file)
+
+    output_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    output_file = '/data/internes/intTOP50/Resultat_Compare_{}.xlsx'.format(outp
+ut_date)
+    # output_file = 'C:/Users/{}/Documents/Resultat_Compare_{}.xlsx'.format(os.g
+etenv("username"), output_date)
+    compare_and_write_results(most_recent_data, second_most_recent_data, output_
+file)
+
+    print("Fichier de Compare:", output_file)
+else:
+    print("Pas trouve.")
+
+
+print('\n' + most_recent_file)
+print(second_most_recent_file)
+print('\nFin du programme avec succes\n')
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$
+[intTOP50@larip01ch ~]$ more main_script_ip.py
+import os
+import xlsxwriter
+import re
+import datetime
+import glob
+from openpyxl import load_workbook
+from itertools import chain
+from rancid import f
+from rancidinv import finv
+
+import sys
+reload(sys)
+sys.setdefaultencoding('utf8')
+
+script_message = (
+    "---[ SCRIPT IP ]-----------------------------------------------------------
+--\n"
+    "Prerequis :\n\n"
+    "Lancer le script elo_in_script4.py\n"
+    "Le fichier Entree_Script_IP_YYYY_MM_JJ a la date du jour sera genere.\n"
+    "Sinon le script va prendre le fichier d entree le plus recent\n\n"
+    "Script IP v2.0 Dev. par Erhan ZILIFLI (2023)\n"
+    "---------------------------------------------------------------------------
+--\n"
+)
+
+print(script_message)
+
+while True:
+    reponse = raw_input('\nLancer le programme ? (o/n): ')
+    if reponse.lower() != 'n':
+        print('\nExecution de la partie Resultat_Chaine...\n')
+        break
+    elif reponse.lower() == 'n':
+        print('\nFin du programme...\n')
+        quit()
+
+output_date = datetime.datetime.now().strftime("%Y-%m-%d")
+file_elo = r'/data/internes/intTOP50/Entree_Script_IP_{}.xlsx'.format(output_dat
+e)
+# file_elo = r'C:/Users/u117235/Documents/ELO_IN_TEST.xlsx'
+# dir_conf = r'C:/Users/u117235/Documents/SCRIPT_IP_EP/TEST DEBBUG/CONFPE/'
+# dir_inv = r'C:/Users/u117235/Documents/SCRIPT_IP_EP/TEST DEBBUG/INVENTORY/'
+
+if not os.path.exists(file_elo):
+    files = glob.glob(r'/data/internes/intTOP50/Entree_Script_IP_*.xlsx')
+    if files:
+        latest_file = max(files, key=os.path.getctime)
+        file_elo = latest_file
+
+### La classe Routeur est une representation d'un objet routeur avec des attribu
+ts tels que pe, vlan, etats, p_in, et p_out ###
+
+class Routeur:
+    def __init__(self, pe, vlan, etats, p_in, p_out, pec_uae):
+        self.pe = pe
+        self.vlan = vlan
+        self.etats = etats
+        self.p_in = p_in
+        self.p_out = p_out
+        self.pec_uae = pec_uae
+
+### Fonction permettant de verifier si la conf du PE existe sur le server ###
+
+    def verif_conf(self, path, swag):
+        if swag == '31TLS1-NRO-1': swag = '31tls1-nro-1.nro.gaoland.net'
+        if swag == '92CBV1-NRO-1': swag = '92cbv1-nro-1.nro.gaoland.net'
+        if swag is None or path is None:
+            return False, None, []
+        if not os.path.exists(path):
+            return False, None, []
+        verif_result = False
+        full_path_result = None
+        csv_data = []
+        for file in os.listdir(path):
+            if file.startswith(swag.lower()) and not file.lower().endswith('-hb'
+):
+                verif_result = True
+                full_path_result = os.path.join(path, file)
+
+                try:
+                    with open(full_path_result, mode='r') as f:
+                        csv_data = f.readlines()
+                except IOError as e:
+                    print('Erreur lors de la lecture du fichier CSV : {}'.format
+(e))
+                    csv_data = []
+                break
+        return verif_result, full_path_result, csv_data
+
+### Fonction permettant de recuperer le port d entree du SWAG ###
+
+    def swag_p_in(self, Routeur1, Adduct1, csv_data, inv_data):
+        with open(csv_data, mode='r') as f:
+            csv_read = f.read()
+
+        if "\n#\n" in csv_read and any(substring in Routeur1.pe for substring in
+ ('-SWAGR-', '-SWGNG-', '-S6348-', '-S6330-', '-SWS-')):
+            blocs = [bloc for bloc in csv_read.split('\n#\n') if 'interface ' in
+ bloc and 'description ' in bloc and not 'protocol-transparent' in bloc]
+            blocs_out = [bloc for bloc in csv_read.split('\n#\n') if 'eth-trunk
+' in bloc and 'description ' in bloc and not 'shutdown' in bloc]
+        elif "\n#\n" not in csv_read and any(substring in Routeur1.pe for substr
+ing in ('-OS68E-', '-OS685-', '-OS655-')):
+            blocs_init = [bloc for bloc in csv_read.split(' :\n') if 'interfaces
+ ' in bloc and 'alias ' in bloc]
+            blocs = [bloc for bloc in blocs_init[0].split('\n') if 'interfaces '
+ in bloc and 'alias ' in bloc]
+            blocs_out = [bloc for bloc in blocs_init[0].split('\n') if Routeur1.
+pe in bloc and 'alias ' in bloc]
+        else:
+            return None, None
+
+        vfind = 'None'
+        bloc_in = None
+
+        for current_bloc in blocs:
+            if Adduct1.mid and Adduct1.mid in current_bloc:
+                vfind = 'MID'
+                bloc_in = current_bloc
+                break
+            elif Adduct1.rad and Adduct1.rad in current_bloc:
+                vfind = 'RAD'
+                bloc_in = current_bloc
+                break
+
+        if not bloc_in:
+            Adduct1.rad = Adduct1.rad.rsplit('-', 1)[0].replace('RAD-', '') + '-
+'
+            for current_bloc in blocs:
+                if Routeur1.vlan and ' {} '.format(str(Routeur1.vlan)) in curren
+t_bloc and Adduct1.p_uae in current_bloc:
+                    vfind = 'VLAN'
+                    bloc_in = current_bloc
+                    break
+                elif Adduct1.cptl and Adduct1.cptl in current_bloc:
+                    vfind = 'CPTL'
+                    bloc_in = current_bloc
+                    break
+                elif Adduct1.p_uae and Adduct1.p_uae in current_bloc:
+                    vfind = 'P_UAE'
+                    bloc_in = current_bloc
+                    break
+                elif Adduct1.rad and Adduct1.rad in current_bloc:
+                    vfind = 'RAD'
+                    bloc_in = current_bloc
+                    break
+        blocs_pe_out = [' '.join(Routeur1.filtre_desc(bloc, Routeur1)) for bloc
+in blocs_out if bloc]
+        blocs_pe_out = list(set(filter(None, blocs_pe_out)))
+
+        if len(blocs_pe_out) > 1: blocs_pe_out = Routeur1.peco_y(Routeur1, inv_d
+ata, blocs_pe_out)
+        # if len(blocs_pe_out) > 1 and any('-PECNG-' in bloc for bloc in blocs_p
+e_out):
+        #     blocs_eth = [bloc for bloc in csv_read.split('\n#\n')if all(keywor
+d in bloc for keyword in ('interface Eth-Trunk', 'description ', 'port trunk all
+ow-pass vlan'))]
+        #     eth_configs = [[line for line in bloc.split('\n') if any(keyword i
+n line for keyword in ('description ', 'interface Eth-Trunk', 'port trunk allow-
+pass vlan')) and 'undo' not in line] for bloc in blocs_eth[:2]]
+        #     trunk_configs = [Routeur1.extract_vlan_ranges(config) for config i
+n eth_configs]
+        #     is_in_trunk = [Routeur1.vlan_in_trunk(Routeur1.vlan, trunk_config)
+ for trunk_config in trunk_configs]
+        #     if is_in_trunk[0]:
+        #         blocs_pe_out = Routeur1.filtre_desc(eth_configs[0][1], Routeur
+1)
+        #     else:
+        #         blocs_pe_out = Routeur1.filtre_desc(eth_configs[1][1], Routeur
+1)
+        # else:
+        #     blocs_pe_out = Routeur1.peco_y(Routeur1, inv_data, blocs_pe_out)
+
+        blocs_p_out = [' '.join(Routeur1.filtre_port(bloc_out, Routeur1)) for bl
+oc_out in blocs_out if bloc_out]
+        blocs_port_in = ' '.join(Routeur1.filtre_port(bloc_in, Routeur1)) if blo
+c_in else None
+        return blocs_port_in, vfind, ' '.join(blocs_p_out), ' '.join(blocs_pe_ou
+t).strip()
+
+### Fonction permettant d extraire les vlans dans un range ###
+
+    # def extract_vlan_ranges(self, eth_config):
+    #     for line in eth_config:
+    #         if 'port trunk allow-pass vlan' in line:
+    #             vlan_ranges_str = line.split('port trunk allow-pass vlan')[1].
+strip()
+    #             return self.parse_vlan_ranges(vlan_ranges_str)
+    #     return []
+
+### Convertit une chaine de plages VLAN en liste de tuples (debut, fin) ###
+
+    # def parse_vlan_ranges(self, vlan_ranges_str):
+    #     vlan_ranges = []
+    #     cleaned_ranges_str = re.sub(r'(\d+ to \d+)', r',\1', vlan_ranges_str).
+strip(',')
+    #     ranges = [v.strip() for v in cleaned_ranges_str.split(',')]
+
+    #     for vlan_range in ranges:
+    #         if 'to' in vlan_range:
+    #             try:
+    #                 start, end = map(int, vlan_range.split('to'))
+    #                 vlan_ranges.append((start, end))
+    #             except ValueError:
+    #                 raise ValueError("Format de plage invalide : {}".format(vl
+an_range))
+    #         else:
+    #             try:
+    #                 vlan = int(vlan_range.strip())
+    #                 vlan_ranges.append((vlan, vlan))
+    #             except ValueError:
+    #                 raise ValueError("Format de VLAN invalide : {}".format(vla
+n_range))
+    #     return vlan_ranges
+
+### Verifie si un VLAN appartient aux plages d'un trunk ###
+
+    # def vlan_in_trunk(self, vlan, trunk_config):
+    #     for vlan_range in trunk_config:
+    #         if vlan_range[0] <= vlan <= vlan_range[1]:
+    #             return True
+    #     return False
+
+### Fonction permettant de verifier si le Trunk du SWAG est UP (pour les connexi
+on en Y migration PE) ###
+
+    def peco_y(self, Routeur1, inv_data, blocs_pe_out):
+        for pe in blocs_pe_out:
+            for inv in inv_data:
+                if '!Interfaces: Eth-Trunk' in inv and pe in inv and 'down' in i
+nv:
+                    blocs_pe_out.remove(pe)
+        return blocs_pe_out
+
+### Fonction permettant de recuperer le port d entree du SWAG OLT ###
+
+    def conf_olt(self, Routeur1, Adduct1, csv_data):
+        for line in csv_data:
+            if Adduct1.mid in line:
+                vfind = 'MID'
+                break
+            elif Adduct1.rad in line:
+                vfind = 'RAD'
+                break
+        vlist = ''.join(line).split(' ')
+        return vlist[1].replace('--slot=', 'S') + "/" + vlist[2].replace('--port
+=eth.', ''), vfind
+
+### Fonction permettant de verifier l etat du port d'entree du SWAG ###
+
+    def inv_hw(self, Routeur1, Adduct1, csvinv_data):
+        Port_1 = Routeur1.p_in.replace('interface ', '').replace('GigabitEtherne
+t', 'GE') if 'GigabitEthernet' in Routeur1.p_in else Routeur1.p_in.replace('inte
+rface ', '').replace('G', 'GE')
+        Port_2 = Routeur1.p_in.replace('interfaces ', '').replace('S', '') if 'S
+' in Routeur1.p_in else Routeur1.p_in.replace('interfaces ', '').replace('G', ''
+)
+        for inv in csvinv_data:
+            if (Port_1 in inv and '!Interfaces' in inv) or (Adduct1.cptl is not
+None and Adduct1.cptl in inv and '!Interfaces' in inv):
+                vlist = list(set(str(inv).rstrip('\n').split()))
+                Routeur1.etats = 'DOWN' if 'down' in vlist else 'UP'
+                break
+            elif (Port_2 in inv and 'Interfaces' in inv) or (Adduct1.cptl is not
+ None and Adduct1.cptl in inv and '!Interfaces' in inv):
+                vlist = list(set(str(inv).rstrip('\n').split(';')))
+                Routeur1.etats = 'DOWN' if 'down' in vlist else 'UP'
+                break
+        else:
+            Routeur1.etats = 'Mid Absent/LIBRE'
+
+### Fonction permettant de recuperer dans une chaine les differents nom de PE SW
+AG et PECO ###
+
+    def filtre_desc(self, strings, Routeur1):
+        vdesc = re.split('[^a-zA-Z0-9-]', str(strings).upper())
+        vdesc = list(set(vdesc))
+        patterns = [
+            r'^[^-_]*-AS[^-]*-[^-/]*$',
+            r'^[^-_]*-AS[^-]*-[^-/]*-[^-/]*$',
+            r'^[^-_]*-PE[^-][^BIB]*-[^-/]*$',
+            r'^[^-_]*-NRO[^-]*-[^-/]*$',
+            r'[^-_]*-ASR[^-]*-[^-_]*',
+            r'^[^-_]*-S[^-][^SFIP]*-[^-/]*$']
+        result = []
+        for element in vdesc:
+            if not Routeur1.pe in element and '-PEAG-' not in element and '-SEC-
+' not in element:
+                for pattern in patterns:
+                    if re.match(pattern, element):
+                        nouvelle_chaine = re.sub(r'^(.*?-.*?-.*?)-.*$', r'\1', e
+lement)
+                        if '-BE' in element: nouvelle_chaine = element.split('-B
+E')[0]
+                        result.append(nouvelle_chaine)
+                        break
+        return list(set(result))
+
+### Fonction permettant de recuperer dans une chaine les differents nom de PE co
+te backbone ###
+
+    def filtre_bib(self, strings, Routeur2, Routeur2_pe):
+        vdesc = re.split('[^a-zA-Z0-9-]', str(strings).upper())
+        vdesc = list(set(vdesc))
+        patterns = [
+            r'\b([A-Z0-9]+-ASR[A-Z0-9]+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-(?![^-]*SECOND[^-]*)SE[A-Z0-9]+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-ASR[A-Z0-9]+-[A-Z0-9]+-CR+)\b',
+            r'\b([A-Z0-9]+-CRS[A-Z0-9]+-[A-Z0-9]+-CR+)\b',
+            r'\b([A-Z0-9]+-PEBIB+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-PECNG+-[0-9]+)\b', r'\b([A-Z0-9]+-PECNG+-[A-Z0-9]+-DG
+A+)\b',
+            r'\b([A-Z0-9]+-NRO+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-SEC+-[A-Z0-9]+)\b',
+            r'\b([A-Z0-9]+-CO+-[A-Z0-9]+)\b', r'\b([A-Z0-9]+-BIB+-[A-Z0-9]+)\b',
+
+            r'\b([A-Z0-9]+-P+-[A-Z0-9]+)\b', r'\b([A-Z0-9]+-PESMS+-[A-Z0-9]+)\b'
+]
+        result = []
+        for element in vdesc:
+            if element == '92TSN1-PECNG-1-101-78VRS2-PECNG-1': element = '78VRS2
+-PECNG-1'
+            if element == '65TPA-SE100-01': element = '64TPA-SE100-01'
+            if 'EQUIPEMENT-' in element: element = element.replace('EQUIPEMENT-'
+, '')
+            if '-TE0' in element: element = element.replace('-TE0', '')
+            if not Routeur2_pe in element or Routeur2_pe + '-CR' in element:
+                for pattern in patterns:
+                    if re.match(pattern, element):
+                        nouvelle_chaine = re.sub(r'^(.*?-.*?-.*?-CR)-.*$' if '-C
+R' in element else r'^(.*?-.*?-.*?)-.*$', r'\1', element)
+                        result.append(nouvelle_chaine)
+                        break
+        return list(set(result))
+
+### Fonction permettant de recuperer dans une chaine les ports des PE ###
+
+    def filtre_port(self, portdata, Routeur2):
+        vport = re.split('[^a-zA-Z 0-9/]', str(portdata))
+        vport = list(set(vport))
+        patterns = [
+            r'\bport [0-9]+/[0-9]+/[a-zA-Z0-9]+/[0-9]+\b',
+            r'\bport [0-9]+/[0-9]+/[0-9]+\b',
+            r'\bport ethernet [0-9]+/[0-9]+\b',
+            r'\binterface GigabitEthernet[0-9]+/[0-9]+/[0-9]+/[0-9]+\b', r'\bint
+erface GigabitEthernet[0-9]+/[0-9]+/[0-9]+\b', r'\binterface 100GE[0-9]+/[0-9]+/
+[0-9]+\b', r'\binterface XGigabitEthernet[0-9]+/[0-9]+/[0-9]+\b', r'\binterface
+TenGigE[0-9]+/[0-9]+/[0-9]+/[0-9]+/[0-9]+\b', r'\binterface TenGigE[0-9]+/[0-9]+
+/[0-9]+/[0-9]+\b', r'\binterface TenGigabitEthernet[0-9]+/[0-9]+\b', r'\binterfa
+ce HundredGigE[0-9]+/[0-9]+/[0-9]+/[0-9]+\b', r'\binterfaces [0-9]+/[0-9]+\b', r
+'\bTrunk[0-999]+\b']
+        result = []
+        for element in vport:
+            for pattern in patterns:
+                if re.match(pattern, element.strip()):
+                    result.append(element.replace('port ', 'T').replace('interfa
+ce ', '').replace('interfaces ', 'S').replace('Tethernet ', 'T').replace('Gigabi
+tEthernet', 'G').replace('TenGigE', 'Te').replace('HundredGigE', 'Hu').replace('
+TenG', 'Te').replace(' alias ', '').replace('Trunk', 'Eth-Trunk').strip())
+                    break
+        return result
+
+### Fonction permettant de corriger des erreurs ###
+
+    def exceptions(self, blocs_bib, routeur_pe):
+        conditions_de_suppression = {
+            'ISS2-PESMS-1': 'PSO1-PESMS-1', '92TSN1-PECNG-1': '92TSN1-PECNG-1',
+            'TLA1-PESMS-1': 'TLS2-CO-3',
+            'SDT2-PESMS-1': 'CBV1-CO-7',
+            'LIM2-PESMS-1': '31TLS1-PEBIB-4'
+        }
+        element_a_supprimer = conditions_de_suppression.get(routeur_pe)
+        if element_a_supprimer in blocs_bib:
+            blocs_bib.remove(element_a_supprimer)
+
+        count_pebib = sum(1 for bloc in blocs_bib if '-PEBIB-' in bloc)
+
+        if count_pebib == 1:
+            blocs_bib = [bloc for bloc in blocs_bib if '-PEBIB-' not in bloc]
+        elif count_pebib == 2:
+            blocs_bib = [bloc for bloc in blocs_bib if '-PEBIB-' in bloc]
+
+        return blocs_bib
+
+### Fonction permettant de remplacer les PE CO par des PEBIB ###
+
+    def replace_values(self, routeur_pe):
+        remplacements = {
+            'CBV3-CO-6': '92CBV3-PEBIB-2', 'LYO1-CO-11': '69LYO1-PEBIB-1', 'NTS2
+-CO-4': '44NTS2-PEBIB-2', 'MAS1-CO-4': '91MAS1-PEBIB-2', '93ABV1-PEBIB-2': '93AU
+B1-PEBIB-2', 'VLT3-PEBIB-3': '94VLT3-PEBIB-3',
+            'PAR1-CO-6': '75PAR1-PEBIB-2', 'CBA1-CO-5': '69CBA1-PEBIB-1', 'POI1-
+CO-5': '86POI1-PEBIB-1', 'TLS1-CO-5': '31TLS1-PEBIB-1', 'LYO1-CO-9': '69LYO1-PEB
+IB-1', 'VEL1-CO-4': '78VEL1-PEBIB-2', 'CBA2-PEBIB-1': '69CBA2-PEBIB-1',
+            'TLS1-CO-6': '31TLS1-PEBIB-2', 'AIX1-CO-3': '13AIX1-PEBIB-1', 'GNB1-
+CO-5': '38GNB1-PEBIB-1', 'TH21-CO-9': '75TH21-PEBIB-1', 'LSE1-CO-3': '83LSE1-PEB
+IB-1', 'NIC1-CO-5': '06NIC1-PEBIB-1', 'MIT1-CO-6': '77MIT2-PEBIB-2',
+            'PAR1-CO-7': '75PAR1-PEBIB-1', 'TH21-CO-8': '75TH21-PEBIB-2', 'SBG3-
+CO-4': '67SBG3-PEBIB-2', 'BDX4-CO-3': '33BDX4-PEBIB-1', 'MPL1-CO-4': '34MPL1-PEB
+IB-2', 'BRO1-CO-3': '69BRO1-PEBIB-1', 'ORL1-CO-6': '45ORL1-PEBIB-2',
+            'NTS2-CO-3': '44NTS2-PEBIB-1', 'TLS3-CO-1': '31TLS3-PEBIB-1', 'SBG1-
+CO-6': '67SBG1-PEBIB-2', 'MPL1-CO-3': '34MPL1-PEBIB-1', 'TRA1-CO-3': '78TRA1-PEB
+IB-1', 'GNB3-CO-4': '38GNB3-PEBIB-2', 'ORL1-CO-5': '45ORL1-PEBIB-1',
+            'SBG3-CO-3': '67SBG3-PEBIB-1', 'VLT3-CO-5': '94VLT3-PEBIB-1', 'MRS1-
+CO-1': '13MRS1-PEBIB-1', 'ABV1-CO-6': '93AUB1-PEBIB-2', 'TRA1-CO-4': '78TRA1-PEB
+IB-2', 'BDX-BIB-1': '33BDX1-PEBIB-1', 'CPY1-PEBIB-3': '94CPY1-PEBIB-3',
+            'ABV1-CO-7': '93AUB1-PEBIB-1', 'LIL1-CO-5': '59LIL1-PEBIB-1', 'LIL1-
+CO-6': '59LIL1-PEBIB-2', 'MRS1-CO-2': '13MRS1-PEBIB-2', 'BRO1-CO-4': '69BRO1-PEB
+IB-2', 'CPY1-CO-3': '94CPY1-PEBIB-1', 'LYO1-CO-8': '69LYO1-PEBIB-2',
+            '92NTR-SE120-01': '92CAP-ASR9K-01', 'MRS1-PEBIB-1': '13MRS1-PEBIB-1'
+, 'MRS1-PEBIB-2': '13MRS1-PEBIB-2', 'NIC2-PEBIB-4': '06NIC2-PEBIB-4', 'REN1-PEBI
+B-1': '35REN1-PEBIB-1', 'REN1-PEBIB-2': '35REN1-PEBIB-2',
+            'CBV4-PEBIB-1': '92CBV4-PEBIB-1', 'LYO1-PEBIB-2': '69LYO1-PEBIB-2',
+'LYO1-PEBIB-2': '69LYO1-PEBIB-2', 'CAL1-PEBIB-3': '62CAL1-PEBIB-3', 'MTZ3-PEBIB-
+3': '57MTZ3-PEBIB-3', 'MIT2-PEBIB-2': '77MIT2-PEBIB-2'
+        }
+
+        if routeur_pe is not None:
+            for valeur, remplacement in remplacements.items():
+                if ' ' + valeur in routeur_pe or routeur_pe.startswith(valeur):
+                    routeur_pe = routeur_pe.replace(valeur, remplacement)
+        return routeur_pe
+
+### Fonction permettant de recuperer les ports d entree et sortie du PE et obten
+ir le ou les nom du PE suivant ###
+
+    def conf_peco(self, Routeur2, Adduct_offre, Routeur2_pe, Routeur1_pe, csv_da
+ta):
+        with open(csv_data, mode='r') as f:
+            csv_read = f.read()
+
+        if Routeur1_pe == 'BEA2-SWAGR-1A': Routeur1_pe = 'BEA1-SWAGR-1A'
+        if Routeur1_pe == 'PGA1-SWAGR-1B': Routeur1_pe = 'PGA1-SWAGR-1A'
+
+        if "\n!\n" in csv_read and any(substring in Routeur2_pe for substring in
+ ('-PESMS-', '-PEHMS-', '-PECNG-', '-ASR91-', '-ASR96-')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Routeur1_pe
+in bloc.upper() and not ' access' in bloc and not 'Bundle-Ether' in bloc]
+            blocs_pe = [bloc for bloc in csv_read.split('\n!\n') if ('link-group
+ BE' in bloc and 'port ethernet' in bloc) or ('bind interface bib' in bloc and '
+port ethernet' in bloc) or ('bind interface nim' in bloc and 'port ethernet' in
+bloc) or ('interface HundredGigE' in bloc and not 'shutdown' in bloc and not ' r
+esilier ' in bloc and 'load-interval' in bloc and not 'bundle port-priority'in b
+loc) or ('interface TenGigE' in bloc and not 'shutdown' in bloc and not ' resili
+er ' in bloc and 'load-interval' in bloc and not 'bundle port-priority'in bloc)]
+
+        elif "\n!\n" not in csv_read and any(substring in Routeur2_pe for substr
+ing in ('-PESMS-', '-PEHMS-', '-NRO-', '-PECNG-')):
+            blocs_in = [bloc for bloc in csv_read.split('    exit') if Routeur1_
+pe in bloc.upper()]
+            blocs_pe = [bloc for bloc in csv_read.split('    exit') if 'QUEUE-BB
+' in bloc and 'egress-scheduler-policy "PORT-BB"' in bloc]
+        elif "\n!\n" in csv_read and any(substring in Routeur2_pe for substring
+in ('-NRO-', '-SE800-', '-SE120-', '-SE100-', '-SE400-')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Routeur1_pe
+in bloc.upper() and 'port ethernet' in bloc and 'description' in bloc]
+            blocs_pe = [bloc for bloc in csv_read.split('\n!\n') if 'router mpls
+' in bloc]
+            blocs_out = [bloc for bloc in csv_read.split('\n!\n') if 'port ether
+net' in bloc and 'description' in bloc]
+        elif "\n!\n" in csv_read and any(substring in Routeur2_pe for substring
+in ('-ASR9K-', '-SWS-')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Routeur1_pe
+in bloc.upper() and not ' access' in bloc and not 'Bundle-Ether' in bloc]
+            blocs_pe = [bloc for bloc in csv_read.split('\n!\n') if all(keyword
+in bloc for keyword in ['interface', 'QOS-BB-OUT', 'load-interval']) and all(key
+word not in bloc for keyword in ['shutdown', 'mtu 7814'])]
+            blocs_out = [bloc for bloc in csv_read.split('\n!\n') if all(keyword
+ in bloc for keyword in ['interface', 'description']) and all(keyword not in blo
+c for keyword in ['shutdown', 'Bundle-Ether'])]
+        else:
+            return None, None, None
+
+        blocs_p_in = [' '.join(Routeur2.filtre_port(bloc, Routeur2_pe)) for bloc
+ in blocs_in if blocs_in and not ' lag ' in bloc]
+        if 'LAN' in Adduct_offre: return ' '.join(blocs_p_in), 'LAN2LAN', 'LAN2L
+AN'
+        blocs_bib = [' '.join(Routeur2.filtre_bib(bloc.upper(), Routeur2, Routeu
+r1_pe)) for bloc in blocs_pe if blocs_pe]
+
+
+
+        blocs_bib = set(blocs_bib)
+        blocs_bib = [liste for liste in blocs_bib if liste]
+
+        blocs_bib = [sous_element for element in blocs_bib for sous_element in e
+lement.split(' ')]
+        blocs_bib = [pe for pe in blocs_bib if not ((Routeur2_pe == '92TSN1-PECN
+G-1' and pe == '92TSN1-PECNG-1') or (Routeur2_pe == '94CPS1-NRO-1' and pe == '94
+CPS1-NRO-1') or (Routeur2_pe == '31NTC-ASR96-01' and pe == '31TLS1-PEBIB-1') or
+(Routeur2_pe == '94VSS-ASR91-01' and pe == '94VSS-ASR91-01') or (Routeur2_pe ==
+'35TRE-SE100-01' and pe == '35TRE-SE100-01') or (Routeur2_pe == '33BOR-ASR96-01'
+ and pe == '33BOR-ASR96-01'))]
+
+        if len(blocs_bib) > 2 : blocs_bib = Routeur2.exceptions(blocs_bib, Route
+ur2_pe)
+        if any(substring in Routeur2.pe for substring in ('-NRO-', '-ASR9K-', '-
+SE')) and "\n!\n" in csv_read : blocs_pe = blocs_out
+
+        blocs_bib = ['93AUB1-PEBIB-1' if pe == 'ABV1-CO-7' and any(Routeur2_pe =
+= substring for substring in ('75CST1-NRO-1', '75PEL1-NRO-1')) else pe for pe in
+ blocs_bib]
+        blocs_bib = [pe for pe in blocs_bib if not (Routeur2_pe == '13AIX1-NRO-1
+' and pe == 'AIX1-CO-2')]
+
+        blocs_bib = [Routeur2.replace_values(pebloc) for pebloc in blocs_bib]
+        blocs_p_out = [' '.join(Routeur2.filtre_port(bloc, Routeur2_pe)) for blo
+c in blocs_pe if any(keyword.lower() in bloc.lower() for keyword in blocs_bib)]
+        if any(substring in Routeur2_pe for substring in ('-SE', '-ASR')) and an
+y('CRSX' in i or '-CR' in i for i in blocs_bib): return ' '.join(blocs_p_in), 'C
+PTL', 'CPTL'
+        return ' '.join(blocs_p_in), ' '.join(blocs_p_out), ' '.join(set(blocs_b
+ib))
+
+### Fonction permettant de recuperer les ports d entree des PE Backbone ###
+
+    def port_pebib(self, Routeur3, Rout2, Rout3, csv_data):
+        if 'LAN' in Rout3: return 'LAN2LAN' if blocs_in else ''
+        with open(csv_data, mode='r') as f:
+            csv_read = f.read()
+
+        if Rout2 == '76TRO-ASR96-01': Rout2 = '76TRO-ASR91-01'
+
+        if "\n!\n" in csv_read and any(substring in Rout3 for substring in ('-PE
+BIB-', '-PECNG-', '-SEC-', '-CO-', '-SE800-', '-SE120-', '-SE100-', '-SE400-', '
+-ASR')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Rout2 in blo
+c.upper() and all(keyword in bloc for keyword in ['interface ', 'description'])
+and all(keyword not in bloc for keyword in ['shutdown', 'Bundle-Ether', 'Deploie
+ment', '-PEAG-'])]
+        elif "\n!\n" not in csv_read and any(substring in Rout3 for substring in
+ ('-P-', '-PECNG-', '-NRO-')):
+            blocs_in = [bloc for bloc in csv_read.split('    exit') if Rout2 in
+bloc.upper() and 'description' in bloc and any(keyword in bloc for keyword in ['
+QUEUE-BB', 'mtu 4014', 'mtu 9198', 'mode hybrid']) and all(keyword not in bloc f
+or keyword in ['-PEAG-'])]
+        elif "\n!\n" in csv_read and any(substring in Rout3 for substring in ('-
+NRO-')):
+            blocs_in = [bloc for bloc in csv_read.split('\n!\n') if Rout2 in blo
+c.upper() and all(keyword in bloc for keyword in ['port ethernet', 'description'
+])]
+        else:
+            return ''
+        blocs_in = [' '.join(Routeur3.filtre_port(bloc, Rout2)) for bloc in bloc
+s_in if blocs_in]
+        return ' '.join(blocs_in) if blocs_in else ''
+
+### La classe Adduct est une representation d'un objet Adduct avec des attributs
+ tels que client, site, couple, mid, rtc, rad, p_uae et cptl ###
+
+class Adduct:
+    def __init__(self, client, site, offre, couple, mid, rtc, rad, p_uae, cptl):
+
+        self.client = client
+        self.site = site
+        self.offre = offre
+        self.couple = couple
+        self.mid = mid
+        self.rtc = rtc
+        self.rad = rad
+        self.p_uae = p_uae
+        self.cptl = cptl
+
+### La classe Rend est une representation d'un objet Rend avec des attributs tel
+s que peng1 et peng2 ###
+
+class Rend:
+    def __init__(self, peng1, peng2, wbxs, cpt):
+        self.peng1 = peng1
+        self.peng2 = peng2
+        self.wbxs = wbxs
+        self.cpt = cpt
+
+### Fonction permettant d ecrire les valeurs obtenues dans un fichier excel ###
+
+    def write_excel(self, wbxs, cpt, Rend1, Adduct1, Value1, Value2, Value3, Val
+ue4, Value5, Value6, Value7, Value8, Value9, Value10):
+        wbxs.write_row(cpt, 0, (Adduct1.client, Adduct1.site, Adduct1.couple, Ad
+duct1.mid, Value1, Value2, Value3, Value4, Value5, Value6, Value7, Value8, Value
+9, Value10, Rend1.peng1, Rend1.peng2))
+
+### Fonction permettant d ajouter des separateur entre les PE et les ports ###
+
+    def separateur(self, strings):
+        if strings == 'None None': strings = ''
+        return ' | '.join(strings.strip().split(' ')) if strings else ''
+
+def main():
+    cpt = 0
+    column = 0
+    cpttrue = 0
+    cptfalse = 0
+
+    try:
+        wb = load_workbook(file_elo)
+        ws = wb.active
+    except FileNotFoundError as e:
+        print('Erreur lors du chargement du fichier ELO_IN : {}'.format(e))
+        return
+
+    output_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    wbx = xlsxwriter.Workbook('/data/internes/intTOP50/Resultat_Chaine_{}.xlsx'.
+format(output_date))
+    # wbx = xlsxwriter.Workbook('C:/Users/{}/Documents/ELO_OUT_LAB_1.xlsx'.forma
+t(os.getenv("username"), output_date))
+    wbxs = wbx.add_worksheet()
+
+    content = ["Client", "Site", "Couple", "MID", "ETAT", "P_ETAT",
+                        "P_IN", "SWAG", "P_OUT", "P_IN", "PECO", "P_OUT", "P_IN"
+, "PEBIB", "PENG1", "PENG2"]
+
+    for item in content:
+        wbxs.write(cpt, column, item)
+        column += 1
+
+    mydic = []
+    for row in ws.values:
+        cptl = row[18] if len(row) > 18 else None
+        pec_uae = row[14] if len(row) > 14 else None
+        p_uae = row[12].replace('.', '/') if row[12] is not None and row[12] !=
+'' else None
+        mydic.append({'client': row[0], 'site': row[1], 'offre': row[2], 'mid':
+row[3], 'couple': row[4], 'rtc': row[5], 'rad': row[6], 'pe': row[7], 'vlan': ro
+w[8], 'peng1': row[9], 'peng2': row[10], 'p_uae': p_uae, 'cptl': cptl, 'pec_uae'
+: pec_uae})
+    mydic.pop(0)
+
+    for data_row in mydic:
+        Routeur1 = Routeur(data_row['pe'], data_row['vlan'], None, None, None, d
+ata_row['pec_uae'])
+        routeurs = [Routeur(None, None, None, None, None, None) for _ in range(5
+)]
+        Routeur2, Routeur3, Routeur4, Routeur5, Routeur6 = routeurs
+        Adduct1 = Adduct(data_row['client'], data_row['site'], data_row['offre']
+, data_row['couple'], data_row['mid'], None, data_row['rad'], data_row['p_uae'],
+ data_row['cptl'])
+        Rend1 = Rend(data_row['peng1'], data_row['peng1'], wbxs, cpt)
+        dir_conf = f(Routeur1.pe)
+        dir_inv = finv(Routeur1.pe)
+        verif_result, full_path_result, csv_data = Routeur1.verif_conf(dir_conf,
+ Routeur1.pe)
+        verif_inv, full_inv_result, csv_inv = Routeur1.verif_conf(dir_inv, Route
+ur1.pe)
+        if verif_result and csv_data:
+            if any(substring in Routeur1.pe for substring in ('-SWAGR-', '-SWGNG
+-', '-S6348-', '-S6330-', '-SWS-', '-OS68E-', '-OS685-', '-OS655-')): Routeur1.p
+_in, vfind, Routeur1.p_out, Routeur2.pe = Routeur1.swag_p_in(Routeur1, Adduct1,
+full_path_result, csv_inv)
+            if Routeur1.pec_uae is not None and Routeur2.pe is not None and len(
+Routeur2.pe.split()) > 1:
+                Routeur_Y = Routeur2.pe
+                Routeur2.pe = Routeur1.pec_uae
+            else:
+                Routeur_Y = None
+            if '-GP-' in Routeur1.pe: Routeur1.p_in, vfind = Routeur1.conf_olt(R
+outeur1, Adduct1, csv_data)
+            if Routeur1.p_in and verif_inv: Routeur1.inv_hw(Routeur1, Adduct1, c
+sv_inv)
+
+            # if Routeur1.pe == 'BRS2-SWAGR-1A' and Routeur2.pe == 'BRS2-PEHMS-1
+': Routeur2.pe = 'BRS2-PESMS-1'
+            # if Routeur1.pe == 'PAU3-SWAGR-1A' and Routeur2.pe == 'TLS2-PESMS-1
+': Routeur2.pe = 'PAU3-PESMS-1'
+            # if Routeur1.pe == '77MIT3-SWAGR-1A' and Routeur2.pe == '77MIT3-NRO
+-1': Routeur2.pe = '77MIT2-PECNG-2'
+
+            dir_conf = f(Routeur2.pe)
+            verif_peco, full_peco_result, csv_peco = Routeur1.verif_conf(dir_con
+f, Routeur2.pe)
+            if verif_peco:
+                Routeur2.p_in, Routeur2.p_out, Routeur3.pe = Routeur2.conf_peco(
+Routeur2, Adduct1.offre, Routeur2.pe, Routeur1.pe, full_peco_result)
+
+            if Adduct1.rad.startswith('H') and Adduct1.rad[1].isdigit() and 'H77
+41' not in Adduct1.rad: Routeur3.pe = 'CPTL'
+            if Routeur2.pe == '67SAR1-NRO-1' and '67SBG1-PEBIB-2' in Routeur3.pe
+: Routeur3.pe = Routeur3.pe.replace('67SBG1-PEBIB-2', '67SBG1-PEBIB-4')
+            if Routeur2.pe == '75CST1-NRO-1' and '93ABV1-PEBIB-1' in Routeur3.pe
+: Routeur3.pe = Routeur3.pe.replace('93ABV1-PEBIB-1', '93AUB1-PEBIB-1')
+            if Routeur2.pe == '93KAR1-NRO-1' and '93ABV1-PEBIB-2' in Routeur3.pe
+: Routeur3.pe = Routeur3.pe.replace('93ABV1-PEBIB-2', '93AUB1-PEBIB-2')
+            if Routeur2.pe == '31MIN1-NRO-1' and '31TLS1-PEBIB-1' in Routeur3.pe
+: Routeur3.pe = Routeur3.pe.replace('31TLS1-PEBIB-1', '31TLS1-PEBIB-3')
+            if Routeur2.pe == '33ADO1-NRO-1' and 'BDX1-CO-7' in Routeur3.pe: Rou
+teur3.pe = Routeur3.pe.replace('BDX1-CO-7', '33BDX1-PEBIB-1')
+
+            if Routeur3.pe and not Routeur3.pe == 'CPTL' and 'LAN' not in Adduct
+1.offre:
+                elements = Routeur3.pe.split()
+                p_in_elements = []
+                for element in elements:
+                    dir_conf = f(element)
+                    verif_pebib, full_pebib_result, csv_pebib = Routeur3.verif_c
+onf(dir_conf, element)
+                    if verif_pebib:
+                        p_in_elements.append(Routeur3.port_pebib(Routeur3, Route
+ur2.pe, element, full_pebib_result))
+                    Routeur3.p_in = ' '.join(p_in_elements)
+                    if any(substring in element for substring in ('-NRO-', '-PES
+MS-', '-PECNG-')):
+                        Routeur4.pe = element
+                        dir_conf = f(Routeur4.pe)
+                        verif_pebib, full_pebib_result, csv_pebib = Routeur4.ver
+if_conf(dir_conf, Routeur4.pe)
+                        if verif_pebib:
+                            Routeur4.p_in, Routeur4.p_out, Routeur5.pe = Routeur
+4.conf_peco(Routeur4, Adduct1.offre, Routeur4.pe, Routeur2.pe, full_pebib_result
+)
+                            if Routeur5.pe in ['75TNO1-PECNG-1 75PAR1-PEBIB-1',
+'75PAR1-PEBIB-1 75TNO1-PECNG-1']: Routeur5.pe = '75PAR1-PEBIB-1'
+                            #print(Routeur5.pe)
+                            dir_conf = f(Routeur5.pe)
+                            verif_pebib, full_pebib_result, csv_pebib = Routeur5
+.verif_conf(dir_conf, Routeur5.pe)
+                            #print(verif_pebib)
+                            if verif_pebib :
+                                if "-NRO-" not in Routeur5.pe:
+                                    Routeur5.p_in = Routeur6.port_pebib(Routeur5
+, Routeur4.pe, Routeur5.pe, full_pebib_result)
+                                else:
+                                    Routeur5.p_in, Routeur5.p_out, Routeur6.pe =
+ Routeur5.conf_peco(Routeur5, Adduct1.offre, Routeur5.pe, Routeur4.pe, full_pebi
+b_result)
+                                    dir_conf = f(Routeur6.pe)
+                                    verif_pebib, full_pebib_result, csv_pebib =
+Routeur6.verif_conf(dir_conf, Routeur6.pe)
+                                    Routeur6.p_in = Routeur6.port_pebib(Routeur6
+, Routeur5.pe, Routeur6.pe, full_pebib_result)
+                            else:
+                                Routeur5.pe = "CONF#ABSENT#" + Routeur5.pe
+                                Routeur5.p_in = "PORT#NONE#" + Routeur5.pe
+                #print(Routeur3.pe, Routeur5.pe)
+                #print(Routeur3.p_in, Routeur4.p_out, Routeur5.p_in)
+                if Routeur5.pe and not Routeur6.pe:
+                    Routeur3.pe = Routeur3.pe.strip() + ' ' + Routeur5.pe.strip(
+)
+                    Routeur3.p_in = Routeur3.p_in.strip() + ' ' + Routeur4.p_out
+.strip() + ' ' + Routeur5.p_in.strip()
+                elif Routeur5.pe and Routeur6.pe:
+                    Routeur3.pe = Routeur3.pe.strip() + ' ' + Routeur5.pe.strip(
+) + ' ' + Routeur6.pe.strip()
+                    Routeur3.p_in = Routeur3.p_in.strip() + ' ' + Routeur4.p_out
+.strip() + ' ' + Routeur5.p_in.strip() + ' ' + Routeur5.p_out.strip() + ' ' + Ro
+uteur6.p_in.strip()
+
+            elif Routeur3.pe == 'CPTL':
+                Routeur3.p_in = 'CPTL'
+            elif Routeur3.pe == 'LAN2LAN':
+                Routeur3.p_in = 'LAN2LAN'
+            else:
+                Routeur3.p_in = None
+
+            if Routeur_Y is not None: Routeur2.pe = Routeur_Y
+            # if '75POU1-NRO-1' in Routeur3.pe and '92BOU2-PEBIB-1' in Routeur3.
+pe: Routeur2.p_out, Routeur3.p_in, Routeur3.pe = 'T1/1 T1/1 T1/2 T2/1', 'Te0/0/0
+/38 Te0/0/0/25', '92BOU2-PEBIB-1 75POU1-NRO-1 93AUB1-PEBIB-1'
+            if Routeur2.pe == Rend1.peng1 and 'LAN' not in Adduct1.offre: Routeu
+r2.p_out, Routeur3.p_in, Routeur3.pe = Adduct1.offre, Adduct1.offre, Adduct1.off
+re
+            if Routeur1.p_in is None and Routeur1.etats is None: Routeur1.etats,
+ vfind = ('Mid Absent/LIBRE', 'None')
+            print(Routeur1.p_in, Routeur1.etats, Routeur1.pe, Routeur2.pe, str(T
+rue) + ' ' + vfind)
+            cpttrue, cpt = cpttrue + 1, cpt + 1
+            Rend1.write_excel(wbxs, cpt, Rend1, Adduct1,'True ' + vfind, Routeur
+1.etats, Routeur1.p_in, Routeur1.pe, Rend1.separateur(Routeur1.p_out), Rend1.sep
+arateur(Routeur2.p_in), Rend1.separateur(Routeur2.pe), Rend1.separateur(Routeur2
+.p_out), Rend1.separateur(Routeur3.p_in), Rend1.separateur(Routeur3.pe))
+        else:
+            print(Routeur1.pe, None, False, 'Le fichier Conf est introuvable')
+            cptfalse, cpt = cptfalse + 1, cpt + 1
+            Rend1.write_excel(wbxs, cpt, Rend1, Adduct1, 'False', None, 'Conf Ab
+sent', Routeur1.pe, None, None, None, None, None, None)
+
+    print('Total: '+ str(cpt))
+    print('True: '+ str(cpttrue))
+    print('False: '+ str(cptfalse))
+
+    wbxs.set_column(0, 16, 30)
+    wbxs.autofilter(0, 0, 0, 16)
+    wbx.close()
+
+if __name__ == "__main__":
+    main()
+
+
+print("Execution de la partie...(Resultat_Compare)\n")
+
+import glob
+import os
+import openpyxl
+import datetime
+import difflib
+
+### Fonction permettant de detecter la difference des elements compares ###
+
+def find_differences(str2, str1):
+    str1 = ['None' if s is None else s for s in str1]
+    str2 = ['None' if s is None else s for s in str2]
+
+    d = difflib.Differ()
+    diff = list(d.compare(str1, str2))
+    # diff_only = [line[2:] for line in diff if line.startswith('+ ') or line.st
+artswith('- ') or line.startswith('? ') or line.startswith('  ')]
+    return ''.join(diff)
+
+### Fonction permettant de lire les fichiers excel ###
+
+def read_excel(file_path):
+    workbook = openpyxl.load_workbook(file_path)
+    sheet = workbook.active
+    data = [list(row) for i, row in enumerate(sheet.iter_rows(values_only=True),
+ start=1) if i > 1]
+    return data
+
+### Fonction permettant de comparer deux fichiers ###
+
+def compare_and_write_results(file1_data, file2_data, output_file):
+    output_workbook = openpyxl.Workbook()
+    output_sheet = output_workbook.active
+
+    output_sheet.append(["Row file T", "Row file T-1", "MID", "Couple", "SWAG",
+"Resultat", "Information"])
+
+    client_resilie_rows = []
+
+    for row_idx_file1, row_file1 in enumerate(file1_data, start=1):
+        for row_idx_file2, row_file2 in enumerate(file2_data, start=1):
+            if row_file1[3] == row_file2[3] and row_file1[7] == row_file2[7]:
+                compare_result1, compare_result2 = ("OK", "") if row_file1[0:] =
+= row_file2[0:] else ("NOK", find_differences(row_file1[5:], row_file2[5:]))
+                break
+        else:
+            compare_result1, compare_result2 = ("Nouveau client", "")
+
+        output_sheet.append([row_idx_file1 + 1, '', row_file1[3], row_file1[2],
+row_file1[7], compare_result1, compare_result2])
+
+    for row_idx_file2, row_file2 in enumerate(file2_data, start=1):
+        compare_result_file2 = "Client resilie"
+        for row_idx_file1, row_file1 in enumerate(file1_data, start=1):
+            if row_file2[3] == row_file1[3] and row_file2[7] == row_file1[7]:
+                compare_result_file2 = "OK"
+                break
+        else:
+            output_sheet.append(['', row_idx_file2 + 1, row_file2[3], row_file2[
+2], row_file2[7], compare_result_file2])
+
+    output_sheet.auto_filter.ref = output_sheet.dimensions
+
+    for column in output_sheet.columns:
+        max_length = 0
+        column = [cell for cell in column]
+        for cell in column:
+            try:
+                if len(str(cell.value)) > max_length:
+                    max_length = len(cell.value)
+            except:
+                pass
+        adjusted_width = (max_length + 2)
+        output_sheet.column_dimensions[openpyxl.utils.get_column_letter(column[0
+].column)].width = adjusted_width
+
+    output_workbook.save(output_file)
+
+excel_files_pattern = '/data/internes/intTOP50/Resultat_Chaine_*.xlsx'
+# excel_files_pattern = 'C:/Users/{}/Documents/Resultat_Chaine_*.xlsx'.format(os
+.getenv("username"))
+all_files = glob.glob(excel_files_pattern)
+
+sorted_files = sorted(all_files, key=os.path.getctime, reverse=True)
+
+if len(sorted_files) >= 2:
+    most_recent_file = sorted_files[0]
+    second_most_recent_file = sorted_files[1]
+
+    most_recent_data = read_excel(most_recent_file)
+    second_most_recent_data = read_excel(second_most_recent_file)
+
+    output_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    output_file = '/data/internes/intTOP50/Resultat_Compare_{}.xlsx'.format(outp
+ut_date)
+    # output_file = 'C:/Users/{}/Documents/Resultat_Compare_{}.xlsx'.format(os.g
+etenv("username"), output_date)
+    compare_and_write_results(most_recent_data, second_most_recent_data, output_
+file)
+
+    print("Fichier de Compare:", output_file)
+else:
+    print("Pas trouve.")
+
+
+print('\n' + most_recent_file)
+print(second_most_recent_file)
+print('\nFin du programme avec succes\n')
